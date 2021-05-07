@@ -15,7 +15,6 @@
 // maximum length to which the queue of pending connections for sockfd may grow
 // if excedded, client get "ECONNREFUSED"  error
 
-
 // broken TCP prevention
 int broken = 0;
 
@@ -116,6 +115,11 @@ int main(int argc, char const *argv[])
 
 		// once conencted, get line to echo
 		while(1){
+       		if(broken){
+       			printf("TCP broken detected.");
+       			exit(EXIT_SUCCESS);
+       		}
+       		
 			printf("in while loop\n");
 			printf("input Message to Send : "); scanf(" %s",buff +1);
 
