@@ -221,7 +221,6 @@ void *dataThreadRoutine(void *data)
 	Message *res = malloc(sizeof *res); 
 	memset(res, 0, sizeof(*res));
 	recv(data_server_fd, res, sizeof(*res), 0);
-
   strcpy(serverData, res->body);
 
   // processing

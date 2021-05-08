@@ -458,7 +458,7 @@ char* getStreamFromFile(){
 	if((rfp = fopen(filePath, "r")) == NULL) {
 		return NULL;
 	}
-	fread(serverData, sizeof(char), strlen(serverData), rfp);
+	fread(serverData, sizeof(char), MAX_BUFFER_SIZE, rfp);
 	fclose(rfp);
 	free(filePath);
 	return serverData;
