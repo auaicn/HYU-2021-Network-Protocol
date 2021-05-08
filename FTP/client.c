@@ -18,10 +18,11 @@
 #include <string.h>
 #include <ctype.h>
 
-#define SERVER_IP_ADDRESS (192.168.0.1)
-#define SERVER_PORT (12345) // custom port number
+#define SERVER_IP_ADDRESS (127.0.0.1)
+#define SERVER_CONTROL_PORT (21) // custom port number
 #define MAX_BUFFER_SIZE (1024)
 #define MAX_LEN_COMMAND (5)
+#define MAX_RELATIVE_PATH_LENGTH (2021)
 
 const char whitespaces[] = " \t\n\v\f\r";
 
@@ -63,17 +64,20 @@ int dataThreadID, status;
 pthread_mutex_t gmutex; // = PTHREAD_MUTEX_INITIALIZER;
 pthread_cond_t gcond; // = PTHREAD_COND_INITIALIZER;
 
-char* serverData;
+int requestedPort;
+char serverData[MAX_BUFFER_SIZE];
 
-int cfd;
-struct sockaddr_in addr;
+int cfd, data_server_fd;
+struct sockaddr_in addr, data_server_addr;
 socklen_t addr_size;
 
+char fileName[MAX_RELATIVE_PATH_LENGTH];
+
 bool dataRequestApproved = false;
+enum Command sentCommand = user;
 
 int main()
 {
-
 	setConnectionBrokenHandler();
 
   pthread_mutex_init(&gmutex, NULL);
@@ -84,19 +88,18 @@ int main()
 
 	cfd = socket(AF_INET, SOCK_STREAM, 0);
 	if (cfd == -1)
-        handle_error("socket");
+    handle_error("socket");
 
 	// server side Address setting
 	memset(&addr, 0, sizeof(addr));
-   	addr.sin_family = AF_INET;
-	addr.sin_port = htons(SERVER_PORT);
-  	addr.sin_addr.s_addr = htonl (INADDR_ANY);
-	
-   	addr_size = sizeof(struct sockaddr_in);
+ 	addr.sin_family = AF_INET;
+	addr.sin_port = htons(SERVER_CONTROL_PORT);
+	addr.sin_addr.s_addr = htonl (INADDR_ANY);
+
+ 	addr_size = sizeof(struct sockaddr_in);
 	if(connect(cfd, (struct sockaddr*) &addr , addr_size) == -1)
 		handle_error("connect");
 
-	enum Command sentCommand = user;
 	printf("Connected to Server\n");
 	while(1){
 		userInput = malloc(sizeof(char)*MAX_BUFFER_SIZE);
@@ -106,26 +109,41 @@ int main()
 		memset(res, 0, sizeof(*res));
 
 		// recieve response
-		recv(cfd, res, sizeof(*res),0);
-		printf("[server] %d[%s] %s\n",res->status, toVerbal(res->status), res->body);
+		if(recv(cfd, res, sizeof(*res),0) < 0){
+			printf("hello\n");
+			sleep(10);
+		}
+		printf("svr> %d %s %s\n",res->status, toVerbal(res->status), res->body);
 
 		// processing
 		callback(sentCommand, res);
+		
+		// to clean-use screen, wait a second before ftp > appears
+		struct timespec reqtime;
+		reqtime.tv_sec = 0;
+		reqtime.tv_nsec = 100000000;
+		nanosleep(&reqtime, NULL);
 
 		printf("ftp> "); scanf(" %1023[^\n]", userInput);					// get oneline
-		char* inputCommand = strtok (userInput,", \t\n\v\f\r"); 	// extract first word
-		enum Command command = interpret(inputCommand); 								// interpret the word
+		char* inputCommand = strtok (userInput," \t\n\v\f\r"); 		// extract first word
+		enum Command command = interpret(inputCommand); 					// interpret the word
 		while(command == unknown){
 			printf("unknown command \"%s\"\n",inputCommand);
 			memset(req, 0, sizeof(*req));
 			printf("ftp> "); scanf(" %1023[^\n]", userInput); 			// get oneline
-			char* inputCommand = strtok (userInput,", \t\n\v\f\r"); // extract first word
+			char* inputCommand = strtok (userInput," \t\n\v\f\r"); 	// extract first word
 			command = interpret(inputCommand);											// interpret the word
 		}
 
 		strcpy(req->command,inputCommand);
-		strcpy(req->body,strtok(NULL,", \t\n\v\f\r")); // leftover
+		char* left = strtok(NULL," \t\n\v\f\r");
+		if(left == NULL) left = "\0"; // handle empty body
+		strcpy(req->body,left); // leftover
 		sentCommand = command;
+		if(sentCommand == retr){
+			memset(fileName,0,MAX_RELATIVE_PATH_LENGTH);
+			strcpy(fileName,left);
+		}
 		send(cfd, req, sizeof(*req),0);
 	}
 	return 0;
@@ -138,76 +156,115 @@ int extractClass(int status){
 // 쓰레드 함수
 void *dataThreadRoutine(void *data)
 {
-
 	// parsing 해서 사용하는것은 스레드의 몫
-  char* addressInformation = (char*)data;
-	char* pch = strtok (data,", \t\n\v\f\r");
-  int idx = 0, IPAdress = 0, port = 0;
-  while (idx++ && pch != NULL)
-  {
-  	// do stuff with pch
-    printf ("[%d]%s\n", idx, pch);
-    if(strlen(pch) > 3) {
-    	printf("wrong ip:port given\n");
-    	return NULL;
-    }else {
-	    int value = atoi(pch);
-		  if(value){
-		    if(idx < 4){
-		    	IPAdress *= 256;
-		    	IPAdress += value;
+	int dataPort;
+	if(sentCommand == pasv){
+	  char* addressInformation = (char*)data;
+	  char* messagePart = strtok(addressInformation,"|"); // printf("messagePart: %s\n",messagePart);
+	  char* addressPart = strtok(NULL, "|"); // printf("addressPart: %s\n",addressPart);
 
-		  	}else{
-		  		port *= 256;
-		  		port += value;
-		  	}
-		  }
-  	}
-  }
-  printf("portNumber received is %d\n", port);
+		char* pch = strtok (addressPart,", \t\n\v\f\r");
+	  int idx = 0, IPAdress = 0; dataPort = 0;
+	  while (pch != NULL)
+	  {
+	    printf ("[%d] %s\n", idx, pch);
+	    if(strlen(pch) > 3) {
+	    	printf("wrong ip:dataPort given\n");
+	    	return NULL;
+	    }else {
+		    int value = atoi(pch);
+			  if(value){
+			    if(idx < 4){
+			    	IPAdress *= 256;
+			    	IPAdress += value;
 
-  // data socket opening
-	int dataSocketFd;
-	struct sockaddr_in peer_addr;
-	socklen_t peer_addr_size;
+			  	}else{
+			  		dataPort *= 256;
+			  		dataPort += value;
+			  	}
+			  }
+			  pch = strtok (NULL,", \t\n\v\f\r");
+	  	}
+	  	idx++;
+	  }
+	}else if (sentCommand == port){
+	  char* addressInformation = (char*)data;
+	  char* messagePart = strtok(addressInformation,":"); // printf("messagePart: %s\n",messagePart);
+	  char* portPart = strtok(NULL, ":"); // printf("addressPart: %s\n",addressPart);
+	  dataPort = atoi(portPart);
+	  printf("dataPort : %d\n",dataPort);
+	}
 
-	dataSocketFd = socket(AF_INET, SOCK_STREAM, 0);
-	if (dataSocketFd == -1)
-        handle_error("socket");
+	// data socket [client]
+	data_server_fd = socket(AF_INET, SOCK_STREAM, 0);
+	if (data_server_fd == -1)
+    handle_error("socket");
 
-	// server side Address setting
-	memset(&peer_addr, 0, sizeof(peer_addr));
- 	peer_addr.sin_family = AF_INET;
-	peer_addr.sin_port = htons(SERVER_PORT);
-	peer_addr.sin_addr.s_addr = htonl (INADDR_ANY);
+  // printf("data socket created\n");
+
+	// data socket [server]
+	memset(&data_server_addr, 0, sizeof(struct sockaddr_in));
+ 	data_server_addr.sin_family = AF_INET;
+	data_server_addr.sin_port = htons(dataPort);
+	data_server_addr.sin_addr.s_addr = htonl (INADDR_ANY);
 
   pthread_cond_wait(&gcond, &gmutex);
-  if(!dataRequestApproved){
-  	return NULL;
-  }
 
- 	peer_addr_size = sizeof(struct sockaddr_in);
-	if(connect(dataSocketFd, (struct sockaddr*) &peer_addr , peer_addr_size) == -1)
+  // printf("data thread woke up\n");
+
+	if(connect(data_server_fd, (struct sockaddr*) &data_server_addr , sizeof(struct sockaddr_in)) == -1)
 		handle_error("connect");
 
-  printf("data socket connected\n");
+  // printf("data socket connected\n");
 
-  // wait for 226
+  // anyway, get 
 	Message *res = malloc(sizeof *res); 
 	memset(res, 0, sizeof(*res));
-	recv(dataSocketFd, res, sizeof(*res),0);
+	recv(data_server_fd, res, sizeof(*res), 0);
+
   strcpy(serverData, res->body);
 
-	return NULL;
+  // processing
+  switch (sentCommand){
+  	case retr:{
+  		// save to current folder.
+  		FILE *wfp;
+  		strcat(fileName,"fromServer");
+  		if((wfp = fopen(fileName, "w")) == NULL) {
+				return NULL;
+			}
+			fwrite(serverData, sizeof(char), strlen(serverData), wfp);
+			fclose(wfp);
+  		break;
+  	}
+  	case nlst:{
+  		// parse using |
+  		printf("\n");
+  		char* token = strtok(serverData,"| \t\n\v\f\r");
+  		while(token != NULL){
+  			printf(" %s\n",token);
+				token = strtok(NULL,"| \t\n\v\f\r");		
+  		}
+  		printf("\n");
+  		break;
+  	}
+  	default:
+  		close(data_server_fd);
+			return NULL;
+	}
+
+	close(data_server_fd);
+  return (void*)"Success!";
 }
 
 void callback(enum Command sentCommand, Message* responseMessage) {
 	switch(sentCommand){
 		case user:
 		case pass: 
+		case cwd:
+		case type:
 			break;
 		case nlst:
-			dataRequestApproved = false;
 			switch(extractClass(responseMessage->status)){
 				case 1: {// actually, 150
 					// success
@@ -215,21 +272,19 @@ void callback(enum Command sentCommand, Message* responseMessage) {
 					// thread do something
 			    int status;
 
-	        // wait for 226
+					// wake up and sleep
+					// dataRequestApproved = true;
+					memset(serverData, 0, MAX_BUFFER_SIZE);
+
+			    pthread_cond_signal(&gcond);
+				  pthread_join(dataThread, (void **)&status);
+
+					// wait for 226
 					Message *res = malloc(sizeof *res); 
 					memset(res, 0, sizeof(*res));
 					recv(cfd, res, sizeof(*res),0);
 
-					// wake up and sleep
-					dataRequestApproved = true;
-					memset(serverData, 0, MAX_BUFFER_SIZE);
-			    pthread_cond_signal(&gcond);
-				  pthread_join(dataThread, (void **)&status);
-
-				  // extract data (encapsulated in status variable)
-				  printf("%s\n",serverData);
-
-				  // display direntry
+					// success
 					return;
 				}
 				default:
@@ -240,49 +295,43 @@ void callback(enum Command sentCommand, Message* responseMessage) {
 			// show dir entry
 
 			break;
+		case retr:{
+			switch(extractClass(responseMessage->status)){
+				case 1:{
+					// success
+					// opened channeling
+					// thread do something
+			    int status;
+
+					// wake up and sleep
+					memset(serverData, 0, MAX_BUFFER_SIZE);
+
+			    pthread_cond_signal(&gcond);
+    			pthread_join(dataThread, (void **)&status);
+
+	        // wait for 226
+					Message *res = malloc(sizeof *res); 
+					memset(res, 0, sizeof(*res));
+					recv(cfd, res, sizeof(*res),0);
+					
+				  // extract data (encapsulated in status variable)
+			  	printf("%s\n",serverData);
+			  	return;
+			  }
+				default:
+					// failure
+					return;
+			}
+		}
+		case quit:
+			// cleanup and exit process with EXIT_SUCCESS
+			close(cfd);
+			exit(EXIT_SUCCESS);
+			break;
 		case pasv: 
 			if ((dataThreadID = pthread_create(&dataThread, NULL, dataThreadRoutine, (void *) responseMessage->body)) == -1 ){
 				handle_error("pthread create");
 			}
-			break;
-		case retr:{
-				switch(extractClass(responseMessage->status)){
-					case 1:{
-						// success
-						// opened channeling
-						// thread do something
-				    int status;
-
-		        // wait for 226
-						Message *res = malloc(sizeof *res); 
-						memset(res, 0, sizeof(*res));
-						recv(cfd, res, sizeof(*res),0);
-
-						// wake up and sleep
-						memset(serverData, 0, MAX_BUFFER_SIZE);
-						dataRequestApproved = true;
-				    pthread_cond_signal(&gcond);
-	    			pthread_join(dataThread, (void **)&status);
-
-					  // extract data (encapsulated in status variable)
-				  	printf("%s\n",serverData);
-
-				  	return;
-				  }
-					default:
-						// failure
-						return;
-				}
-			}
-			break;
-		case cwd:
-			break;
-		case quit:
-			// cleanup and exit process with EXIT_SUCCESS
-			printf("quiting...");
-			sleep(1000);
-			exit(EXIT_SUCCESS);
-		case type: 
 			break;
 		case port: 
 			if ((dataThreadID = pthread_create(&dataThread, NULL, dataThreadRoutine, (void *) responseMessage->body)) == -1 ){
@@ -299,15 +348,15 @@ char* toVerbal(int status){
 	status /= 100;
 	switch(status){
 		case 1:
-			return "started";
+			return "INIT";
 		case 2:
-			return "success";
+			return "OK";
 		case 3:
-			return "redirection";
+			return "REDIRECT";
 		case 4:
-			return "error(client)";
+			return "error";
 		case 5:
-			return "error(server)";
+			return "server error";
 		default:
 			return "unknown";
 	}

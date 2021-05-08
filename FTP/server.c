@@ -16,12 +16,15 @@
 #include <stdlib.h>
 #include <stdbool.h>
 #include <string.h>
+#include <ctype.h>
 
-#define SERVER_PORT (12345) // custom port number
+#define SERVER_CONTROL_PORT (21) // custom port number
 #define PASSIVE_PORT (12347) // custom port number
 #define MAX_BUFFER_SIZE (1024)
+#define MAX_DIRENT_LENGTH (1024)
 #define MAX_NUM_CLIENT (1000) // no matters
 #define MAX_LEN_COMMAND (5)
+#define MAX_RELATIVE_PATH_LENGTH (2021)
 
 const char userId[] = "auaicn";
 const char userPassword[] = "thislove1!";
@@ -43,10 +46,9 @@ enum AuthorizationStatus
 {
 	NOTLOGGEDIN,
 	NEEDPASSWORD,
-	LOGGEDIN
+	LOGGEDIN,
+	MODESELECTED,
 };
-
-const char whitespaces[] = " \t\n\v\f\r";
 
 // Message Queue
 typedef struct Message{
@@ -65,11 +67,14 @@ char* getCurrentIpAddress();
 char* changeWorkingDirectory(char*);
 void toLowercase(char*);
 void getDEntries(char*);
+void *dataThreadRoutine(void*);
+bool validDirectoryEntry(char*);
+char* getDirectoryEntries();
+char* getStreamFromFile();
 
-enum Command dataCommand;
-enum AuthorizationStatus authStatus;
-bool loggedOn = false;
-bool validUsername = false;
+enum Command dataCommand = unknown; // strong typing
+enum AuthorizationStatus authStatus = NOTLOGGEDIN; // to submit
+// enum AuthorizationStatus authStatus = LOGGEDIN; // backdoor
 bool asciiMode = true; // 기본적으로 ascii 모드를 지원한다고 하자.
 
 int sfd, cfd, data_server_fd, data_client_fd;
@@ -83,62 +88,75 @@ int dataThreadID, status;
 pthread_mutex_t gmutex; // = PTHREAD_MUTEX_INITIALIZER;
 pthread_cond_t gcond; // = PTHREAD_COND_INITIALIZER;
 
-char relativePath[] = "/";
+char relativePath[MAX_RELATIVE_PATH_LENGTH];
 char* fileName;
-char* filePath;
+int ports[] = {1025,1026,1027,1028,1197,1235,1236,12347,12348,12342,4321,2311,1239,1184, 1216, 1193, 1143, 1266}; // 1024번 이후의 임의의 포트
+int portIdx = 0;
 
 int main()
 {
 
+	signal(SIGPIPE, SIG_IGN);
+
+	relativePath[0] = '.';
+	relativePath[1] = '/';
+
   pthread_mutex_init(&gmutex, NULL);
   pthread_cond_init(&gcond, NULL);
 
-	setConnectionBrokenHandler();
+	// setConnectionBrokenHandler();
 
 	socklen_t peer_addr_size;
 	char* responseMessage;
 
 	sfd = socket(AF_INET, SOCK_STREAM, 0);
 	if (sfd == -1)
-        handle_error("socket");
+    handle_error("socket");
 
 	memset(&my_addr, 0, sizeof(struct sockaddr_in));
 
  	my_addr.sin_family = AF_INET;
-	my_addr.sin_port = htons(SERVER_PORT);
+	my_addr.sin_port = htons(SERVER_CONTROL_PORT);
 	my_addr.sin_addr.s_addr = htonl(INADDR_ANY); // <- 결국 0이다 INADDR_ANY 그리고 0을 처리해주는건 htonl 인듯?
   	
 	// casting INET specific server-side sock address into general sock addr
 	if(bind(sfd, (struct sockaddr *) &my_addr, sizeof(my_addr)) == -1)
 		handle_error("bind");
 
-	if(listen(sfd, MAX_NUM_CLIENT) == -1)
-		handle_error("listen");
-
-	printf("server is now listening on PORT: %d\n",SERVER_PORT);
-
- 	peer_addr_size = sizeof(struct sockaddr_in);
-  cfd = accept(sfd, (struct sockaddr *) &peer_addr, &peer_addr_size);
-  if (cfd == -1)
-      handle_error("accept");
-
-	printf("server connected\n");
-
-	// send Initial Server Connection Success Message
-	send(cfd, newMessage(220, "Server ready"), sizeof(Message),0);
 	while(true){
-		Message *req = malloc(sizeof *req); 
-		memset(req, 0, sizeof *req);
 
-		// receive command
-		recv(cfd, req, sizeof(Message),0);
-		printf("[client] %s --body %s\n", req->command, req->body);
+		if(listen(sfd, MAX_NUM_CLIENT) == -1)
+			handle_error("listen");
 
-		// processing
-		int status = execute(req, responseMessage);
+		printf("server is now listening on PORT: %d\n",SERVER_CONTROL_PORT);
 
-		// send response
-		send(cfd, newMessage(status,responseMessage), sizeof(Message),0);
+	 	peer_addr_size = sizeof(struct sockaddr_in);
+	  cfd = accept(sfd, (struct sockaddr *) &peer_addr, &peer_addr_size);
+	  if (cfd == -1)
+	      handle_error("accept");
+
+		printf("server connected\n");
+
+		// send Initial Server Connection Success Message
+		send(cfd, newMessage(220, "Server ready"), sizeof(Message),0);
+		while(true){
+			Message *req = malloc(sizeof *req); 
+			memset(req, 0, sizeof *req);
+
+			// receive command
+			if(recv(cfd, req, sizeof(Message),0) < 0){
+				close(cfd);
+				sleep(1);
+				break;
+			}
+			printf("[client] %s --body %s\n", req->command, req->body);
+
+			// processing
+			int status = execute(req, responseMessage);
+
+			// send response
+			send(cfd, newMessage(status,responseMessage), sizeof(Message),0);
+		}
 	}
 
 	close(cfd);
@@ -150,229 +168,217 @@ int execute(Message* req, char* responseMessage){
 	enum Command command = interpret(req->command);
 	switch(command){
 		case user:
-			if (strcmp(req->body,userId) == 0){
-				authStatus = NEEDPASSWORD;
-				sprintf(responseMessage, "Password required for %s", userId);
-				return 331;
+			printf("user");
+			if(authStatus == NOTLOGGEDIN){
+				if (strcmp(req->body,userId) == 0){
+					authStatus = NEEDPASSWORD;
+					sprintf(responseMessage, "Password required for \"%s\"", userId);
+					return 331;
+				}else{
+					authStatus = NOTLOGGEDIN;
+					sprintf(responseMessage,"wrong username. try again");
+					return 400;
+				}
 			}else{
-				authStatus = NOTLOGGEDIN;
-				responseMessage = "wrong username. try again";
+				sprintf(responseMessage,"user id already given");
 				return 400;
 			}
 		case pass:{
+			printf("pass");
 			switch(authStatus){
 				case NOTLOGGEDIN:
-					responseMessage = "enter user name";
+					sprintf(responseMessage,"enter user name");
 					return 400;
 					break;
 				case NEEDPASSWORD:
 					if (strcmp(req->body,userPassword) == 0){
-						responseMessage = "Logged on";
+						sprintf(responseMessage,"Logged on");
 						authStatus = LOGGEDIN;
 						return 230;
 					}else{
-						responseMessage = "wrong password. try again";
+						sprintf(responseMessage,"wrong password. try again");
 						return 400;
 					}
 					break;
 				case LOGGEDIN:
-					sprintf(responseMessage, "already logined as \"%s\"", userId);
-					return 400;
+				case MODESELECTED:
+					sprintf(responseMessage, "already logined");
+					return 200;
 					break;						
 				}
 			}
 			break;
-		case nlist:{
-			if(authStatus != LOGGEDIN){
-				responseMessage = "operation not authroized. Please login first.";
+		case nlst:{
+			if(authStatus != MODESELECTED){
+				sprintf(responseMessage,"please select ftp mode first (active, passive)");
 				return 401;
 			}
 			// set command type, wake up and sleep
-			dataCommand = nlist;
+			dataCommand = nlst;
 			pthread_cond_signal(&gcond);
 
-			char* intermediateMessage[] = (char*) malloc(sizeof(char)*MAX_BUFFER_SIZE);
+			char* intermediateMessage = (char*) malloc(sizeof(char)*MAX_BUFFER_SIZE);
 			sprintf(intermediateMessage, "Opening data channel of directory listing of %s", relativePath);
-			send(dfd, newMessage(150, responseMessage), sizeof(Message),0);
+			send(cfd, newMessage(150, responseMessage), sizeof(Message),0);
 
 			// no receive send again
+			int status;
 			pthread_join(dataThread, (void **)&status);
 
-			if(status == NULL){
+			if(status == 0){
 				//cleanup
-		   	close(fp);
 		   	printf("Internal Server Error\n");
      		sprintf(responseMessage, "Internal Server Error\n");
      		return 500;
 			}
 
 			// success
+			authStatus = LOGGEDIN;
      	sprintf(responseMessage, "Successfully transferred %s\n", relativePath);
-			return 226
+			return 226;
 		}
 		case retr:{
-			if(authStatus != LOGGEDIN){
-				responseMessage = "operation not authroized. Please login first.";
+			if(authStatus != MODESELECTED){
+				sprintf(responseMessage,"please select ftp mode first (active, passive)");
 				return 401;
 			}
 
-			// set global path variable
-			fileName = strtok(req->body," \t\n\v\f\r"); // truncate white space
-			filePath = concat(relativePath, fileName);
-			FILE *fp;
-			if((fp = fopen(filePath, "r")) == NULL){
-				//cleanup
-				fclose(fp);
-				sprintf(responseMessage, "failed opening %s",filePath);
+			if(!validDirectoryEntry(fileName = strtok(req->body," \t\n\v\f\r"))){
+				sprintf(responseMessage, "failed opening %s",fileName);
 				return 404;
 			}
+
 			// set command type, wake up and sleep
 			dataCommand = retr;
 			pthread_cond_signal(&gcond);
 
-			char* intermediateMessage[] = (char*) malloc(sizeof(char)*MAX_BUFFER_SIZE);
+			char* intermediateMessage = (char*) malloc(sizeof(char)*MAX_BUFFER_SIZE);
 			sprintf(intermediateMessage,"Opening data Channel of file donwload from server of \"%s\"",fileName);
-			send(dfd, newMessage(150,responseMessage), sizeof(Message),0);
+			send(cfd, newMessage(150,responseMessage), sizeof(Message),0);
 
 			// no receive
+			int status;
 			pthread_join(dataThread, (void **)&status);
 
-			if(status == NULL){
+			if(status == 0){
 				//cleanup
-		   	close(fp);
 		   	printf("Internal Server Error\n");
      		sprintf(responseMessage, "Internal Server Error\n");
      		return 500;
 			}
 
 			// success
+			authStatus = LOGGEDIN;
      	sprintf(responseMessage, "Successfully transferred %s\n", fileName);
 			return 226;
 		}
 		case cwd: // change working directory. same as `cd`
 			if(authStatus != LOGGEDIN){
-				responseMessage = "operation not authroized. Please login first.";
+				sprintf(responseMessage,"operation not authroized. Please login first.");
 				return 401;
 			}
 
-			char* newRelativePath;
-			if((newRelativePath = changeWorkingDirectory(req->body)) == NULL){
+			if(changeWorkingDirectory(req->body) == NULL){
 				// current path change error
-				sprintf(responseMessage, "changing directory failed. current working directory is \"%s\"",relativePath);
-				return 404;
+				sprintf(responseMessage, "changing directory failed. current working directory is \"%s\"", relativePath);
+				return 500;
 			}
 
 			// success
-			sprintf(responseMessage, "changed current working directory to \"%s\"",newRelativePath);
+			sprintf(responseMessage, "changed current working directory to \"%s\"", relativePath);
 			return 226;
 		case quit:
 			// success
-			responseMessage = "Goodbye";
+			sprintf(responseMessage,"Goodbye");
 			authStatus = NOTLOGGEDIN; // 아예 꺼지기때문에 상관없긴 하다.
 			return 221;
 		case type:
 			if(authStatus != LOGGEDIN){
-				responseMessage = "operation not authroized. Please login first.";
+				sprintf(responseMessage,"operation not authroized. Please login first.");
+				return 401;printf("please select ftp mode first (active, passive)");
+			}
+			// success
+			if(strlen(req->body) != 1){
+				sprintf(responseMessage, "type must be a single character \"%s\" is not a single character.", req->body);
 				return 401;
 			}
-
-			// success
-			if(tolower((req->body)[0]) == "i"){
+			if(tolower(req->body[0]) == 'i'){
 				asciiMode = false;
 				// binary file transfer mode
 				sprintf(responseMessage, "Type set to %s (Binary)", req->body);
-			}else{
+			} else if(tolower(req->body[0]) == 'a'){
 				// ascii file transfer mode
 				asciiMode = true;
 				sprintf(responseMessage, "Type set to %s (Ascii)", req->body);
+			}else{
+				sprintf(responseMessage, "invalid file transfer type \"%s\"", req->body);
+				return 401;
 			}
 			return 200;
-		case pasv:
+		case pasv:{
 			if(authStatus != LOGGEDIN){
-				responseMessage = "operation not authroized. Please login first.";
+				sprintf(responseMessage,"operation not authroized. Please login first.");
 				return 401;
 			}
 
-			/*
-			// we have to find available port
-			int portCandidate = SERVER_PORT;
-
-			if((dfd = socket(AF_INET, SOCK_STREAM, 0)) == -1)
-				handle_error("socket");
-
-			data_addr.sin_addr.s_addr = 0;
-			data_addr.sin_addr.s_addr = INADDR_ANY;
-			data_addr.sin_family = AF_INET;
-
-			while(++portCandidate){
-				data_addr.sin_port = htons(portCandidate);
-
-				// try bidning
-				if (bind(dfd, (struct sockaddr *)&data_addr, sizeof(struct sockaddr_in)) == -1) {
-			  	if (errno == EADDRINUSE){
-			    	printf("Port %d is already in use\n", portCandidate);
-			  	}
-					continue;
-				}
-				break;
-			}
-			*/
-
-			int port = PASSIVE_PORT;
-
-			printf("requested portNumber : %d\n",port);
+			int port = ports[portIdx++];
 
 		  // create thread with portnumber
 			if ((dataThreadID = pthread_create(&dataThread, NULL, dataThreadRoutine, (void *) port)) == -1 ){
-				responseMessage = "Internal Server Error";
+				sprintf(responseMessage,"Internal Server Error");
 				return 500;
 			}
 
-			sprintf(responseMessage,"Entering Passive Mode (IPADDRESS,%d,%d)", port/256, port%256);
+			sprintf(responseMessage,"Entering Passive Mode | 192,168,0,1,%d,%d", port/256, port%256);
+			authStatus = MODESELECTED;
 			return 227;
-
-		case port:
+		}
+		case port:{
 			if(authStatus != LOGGEDIN){
-				responseMessage = "operation not authroized. Please login first.";
+				sprintf(responseMessage,"operation not authroized. Please login first.");
 				return 401;
 			}
 
 		  char* pch = strtok (req->body,", \t\n\v\f\r");
 		  int idx = 0, IPAdress = 0, port = 0;
-		  while (idx++ && pch != NULL)
+		  while (pch != NULL)
 		  {
 		  	// do stuff with pch
-		    printf ("[%d]%s\n", idx, pch);
+		    // printf ("[%d]%s\n", idx, pch);
 		    if(strlen(pch) > 3) {
-		    	responseMessage = "invalid port number encountered. Try Agiain"
+		    	sprintf(responseMessage,"invalid port number encountered. Try Agiain");
 		    	return 400;
 		    }else {
 			    int value = atoi(pch);
-		    if(value)
-			    if(idx < 4){
-			    	IPAdress *= 256;
-			    	IPAdress += value;
+			    if(value){
+				    if(idx < 4){
+				    	IPAdress *= 256;
+				    	IPAdress += value;
 
-			  	}else{
-			  		port *= 256;
-			  		port += value;
-			  	}
+				  	}else{
+				  		port *= 256;
+				  		port += value;
+				  	}
+				  }
 		    }
 		    pch = strtok (NULL, ", \t\n\v\f\r");
+		    idx++;
 		  }
 
 		  printf("requested portNumber : %d\n",port);
 
 		  // create thread with portnumber
 			if ((dataThreadID = pthread_create(&dataThread, NULL, dataThreadRoutine, (void *) port)) == -1 ){
-				responseMessage = "Internal Server Error";
+				sprintf(responseMessage,"Internal Server Error");
 				return 500;
 			}
 
-			responseMessage = "Port command successful";
+			sprintf(responseMessage,"Port command successful :%d",port);
+			authStatus = MODESELECTED;
 			return 200;
+		}
 		default:
-			responseMessage = "unknown command";
+			sprintf(responseMessage,"unknown command");
 			return 404;
 	}
 	return -1;
@@ -400,93 +406,90 @@ void *dataThreadRoutine(void *data){
 	  }
 	}
 
-  printf("data socket [server] created\n");
-  printf("data thread gone sleep\n");
+  // printf("data socket [server] created\n");
+  // printf("data thread gone sleep\n");
   pthread_cond_wait(&gcond, &gmutex);
-  printf("data thread woke up\n");
-  if(!dataRequestApproved){
-  	// not approved operation then distroy thread
-  	// main thread is waiting (joining)
-  	return NULL;
-  }
+  // printf("data thread woke up\n");
+  
+  // if(!dataRequestApproved){
+  // 	// not approved operation then distroy thread
+  // 	// main thread is waiting (joining)
+  // 	return NULL;
+  // }
 
   printf("data thread socket now listening on PORT: %d\n", port);
 
 	if(listen(data_server_fd, MAX_NUM_CLIENT) == -1)
 		handle_error("listen");
-	else
-		printf("data thread socket connectd\n");
+	// else
+	// 	printf("data thread socket connected\n");
 
- 	int data_client_addr_size = sizeof(struct sockaddr_in);
+ 	socklen_t data_client_addr_size = sizeof(struct sockaddr_in);
   data_client_fd = accept(data_server_fd, (struct sockaddr *) &data_client_addr, &data_client_addr_size);
   if (data_client_fd == -1)
       handle_error("accept");
-  else
-  	printf("client accepted\n");
+  // else
+  // 	printf("client accepted\n");
 
   // 여기서 분기된다.
   switch (dataCommand){
-  	case RETR:
-  		
-
-  		break;
-  	case NLST:
-
-  		Message *res = malloc(sizeof *res); 
-			memset(res, 0, sizeof(*res));
-			send(data_server_fd, res, sizeof(*res),0);
-			send(data_server_fd, newMessage(150, "Server ready"), sizeof(Message),0);
-
-			sprintf(intermediateMessage,"Opening data Channel of file donwloading from server of %s",filePath);
-
-		  strcpy(serverData, res->body);
-
-  		// give 150 to client
-
-  		// processing
-
-  		return (void*)"Success"; // 알아서 226 은 가게 된다.
+   	case retr:{
+			send(data_client_fd, newMessage(-1, getStreamFromFile()), sizeof(Message), 0);
+  		return (void*) "Success";
+  	}
+  	case nlst:{
+			send(data_client_fd, newMessage(-1, getDirectoryEntries()), sizeof(Message), 0);
+  		return (void*) "Success"; // 알아서 226 은 가게 된다.
+  	}
   	default:
+  		// unkown dataCommand Set
   		return NULL;
   }
 }
 
-char* changeWorkingDirectory(char* relativePath){
-	// get relative Path
-	char* s = strtok(req->body," \t\n\v\f\r"); // truncate white space
-	char *newPath[] = concat(relativePath, s)
-	FILE *fp;
-	if((fp = fopen(newPath, "w")) == NULL){
-		sprintf(responseMessage, "failed opening %s",relativePath);
+char* getStreamFromFile(){
+	char* serverData = malloc(MAX_BUFFER_SIZE);
+	char* filePath = (char*)malloc(MAX_RELATIVE_PATH_LENGTH);
+	memset(filePath,0,MAX_RELATIVE_PATH_LENGTH);
+	strcpy(filePath,relativePath);
+	strcat(filePath,fileName);
+	printf("filePath : %s\n",filePath);
+	FILE *rfp;
+	if((rfp = fopen(filePath, "r")) == NULL) {
 		return NULL;
 	}
-	// File opened
-	relativePath = newPath;
+	fread(serverData, sizeof(char), strlen(serverData), rfp);
+	fclose(rfp);
+	free(filePath);
+	return serverData;
 }
 
-char* getCurrentIpAddress(){
-	int fd;
-	struct ifreq ifr;
-
-	fd = socket(AF_INET, SOCK_DGRAM, 0);
-
-	/* I want to get an IPv4 IP address */
-	ifr.ifr_addr.sa_family = AF_INET;
-
-	/* I want IP address attached to "eth0" */
-	strncpy(ifr.ifr_name, "eth0", IFNAMSIZ-1);
-
-	ioctl(fd, SIOCGIFADDR, &ifr);
-
-	close(fd);
-
-	/* display result */
-	// printf("%s\n", inet_ntoa(((struct sockaddr_in *)&ifr.ifr_addr)->sin_addr));
-	return inet_ntoa(((struct sockaddr_in *)&ifr.ifr_addr)->sin_addr);
-
+bool validDirectoryEntry(char* entryToTest){
+	DIR *currentWorkingDirectory = opendir(relativePath);
+  struct dirent *entry;
+  bool found = false;
+  if (currentWorkingDirectory) {
+    while ((entry = readdir(currentWorkingDirectory)) != NULL) {
+      // printf("%s\n", entry->d_name);
+    	if(strcmp(entry->d_name, entryToTest))
+    		found = true;
+    }
+    closedir(currentWorkingDirectory);
+  }else{
+  	handle_error("opendir");
+  }
+  return found;
 }
 
-Command interpret(char* inputCommand){
+char* changeWorkingDirectory(char* body){
+	// get relative dir
+	char* dirName = strtok(body," \t\n\v\f\r"); // truncate white space
+	if(!validDirectoryEntry(dirName)){ return NULL; }
+	strcat(relativePath, dirName);
+	return relativePath;
+}
+
+enum Command interpret(char* inputCommand){
 	toLowercase(inputCommand);
 	if(strcmp(inputCommand,"user") == 0){
 		return user;
@@ -525,28 +528,37 @@ Message* newMessage(int status, char* body){
 	return message;
 }
 
-void getDEntries(char *path)
-{
+char* getDirectoryEntries(){
 	DIR *dir;
 	struct dirent *entry;
-
-	if ((dir = opendir(path)) == NULL)
+	char* entries = (char*)malloc(MAX_BUFFER_SIZE);
+	memset(entries, 0, MAX_BUFFER_SIZE);
+	if ((dir = opendir(relativePath)) == NULL){
 		perror("opendir() error");
-	else
-	{
-		puts("contents of root:");
-		while ((entry = readdir(dir)) != NULL)
-			printf("  %s\n", entry->d_name);
+	}else{
+		while ((entry = readdir(dir)) != NULL){
+			char* entryName = malloc(MAX_DIRENT_LENGTH);
+			memset(entryName,0,MAX_DIRENT_LENGTH);
+			entryName[0] = '|'; // preprocessing
+			strcpy(entryName+1,entry->d_name);
+			strcat(entries,entryName);
+		}
 		closedir(dir);
 	}
+	printf("entries : %s\n",entries);
+	return entries;
 }
 
 void handlerOnConnectionBroken(int s) {
 	handle_error("[SIGPIPE] connection broken");
 }
 
+void handleSigpipe(){
+
+}
+
 void setConnectionBrokenHandler(){
-	signal(SIGPIPE, handlerOnConnectionBroken); // to prevent broken TCP connection, set signal handler
+	signal(SIGPIPE, handleSigpipe); // to prevent broken TCP connection, set signal handler
 }
 
 void handle_error(char* message){
