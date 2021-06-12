@@ -1,0 +1,7 @@
+{
+  "_id": "60c4afd8d4616e782cbd31b0",
+  "name": "Le Gray",
+  "gender": "male",
+  "company": "OVIUM",
+  "greeting": "Hello, Le Gray! You have 2 unread messages."
+}
