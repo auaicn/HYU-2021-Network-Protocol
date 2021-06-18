@@ -1,5 +1,8 @@
 {
   "files.associations": {
-    "socket.h": "c"
+    "socket.h": "c",
+    "iostream": "cpp",
+    "functional": "cpp",
+    "vector": "cpp"
   }
 }

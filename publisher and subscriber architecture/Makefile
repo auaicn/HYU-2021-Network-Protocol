@@ -1,11 +1,11 @@
-broker: broker.c
-	gcc -o broker broker.c
+broker: broker.cpp
+	g++ --std=c++17 --std=c++17 -o broker broker.cpp
 
-publisher: publisher.c
-	gcc -o publisher publisher.c
+publisher: publisher.cpp
+	g++ --std=c++17 -o publisher publisher.cpp
 
-subscriber: subscriber.c
-	gcc -o subscriber subscriber.c
+subscriber: subscriber.cpp
+	g++ --std=c++17 -o subscriber subscriber.cpp
 
 clean:
 	rm -f *.o
