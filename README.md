@@ -7,6 +7,7 @@
 - MacOS BigSur (intel processor) 에서 개발하고, 테스트 하였습니다.
 - vscode (prettier와 함께 사용하였고, 터미널 4개 5개 띄울때 편안함을 느꼈습니다)
 - project 4 의 contents 를 있음직하게 만들기 위해, https://www.json-generator.com/ 사이트에서 생성하였습니다.
+- 잘 쓰지는 못했지만, make 를 사용하였습니다.
 - posix pthread 를 사용하여 개발하였습니다.
 
 thread, mutex_lock, broadcast, conditional_wait 와 network & host byte 정렬이 어떻게 다른지, port 번호의 충돌은 어떻게 해결할 수 있는지 등에 대해 배울 수 있었습니다!  
